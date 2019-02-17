@@ -117,17 +117,17 @@ class DistributedRake(object):
         self._build_word_degree()
         self._build_ranklist()
 
-    def store_results(self, folder):
-        with open(os.path.join(folder, "ranked_phrases.pkl"), "wb") as wf:
+    def store_results(self, folder, prefix=""):
+        with open(os.path.join(folder, prefix + "ranked_phrases.pkl"), "wb") as wf:
             pickle.dump(self.ranked_phrases, wf)
 
-        with open(os.path.join(folder, "rank_list.pkl"), "wb") as wf:
+        with open(os.path.join(folder, prefix + "rank_list.pkl"), "wb") as wf:
             pickle.dump(self.rank_list, wf)
 
-        with open(os.path.join(folder, "frequency_dist.pkl"), "wb") as wf:
+        with open(os.path.join(folder, prefix + "frequency_dist.pkl"), "wb") as wf:
             pickle.dump(self.frequency_dist, wf)
 
-        with open(os.path.join(folder, "word_degree.pkl"), "wb") as wf:
+        with open(os.path.join(folder, prefix + "word_degree.pkl"), "wb") as wf:
             pickle.dump(self.degree, wf)
 
     def get_phrase_list(self):
