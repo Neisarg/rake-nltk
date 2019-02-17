@@ -23,3 +23,5 @@ Usage of Rake class:
 """
 
 from .rake import Metric, Rake
+from .distributed_rake import DistributedRake
+

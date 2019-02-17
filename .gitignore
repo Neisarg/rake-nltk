@@ -9,3 +9,4 @@ pip-selfcheck.json
 .cache/
 .eggs/
 rake_nltk.egg-info/
+.idea/
