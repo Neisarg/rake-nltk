@@ -13,12 +13,14 @@ import nltk
 from enum import Enum
 from nltk.tokenize import wordpunct_tokenize
 import os
-from multiprocessing import Lock, Value
+from multiprocessing import Lock, Value, Process
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from functools import reduce
 import pickle
 import re
+from sqlitedict import SqliteDict
+import time
 
 class DocCounter(object):
     def __init__(self, initval=0):
@@ -33,19 +35,44 @@ class DocCounter(object):
 
     def value(self):
         with self.lock:
-            return self.val.value
-
+            v = self.val.value
+        return v
 
 class Metric(Enum):
     """Different metrics that can be used for ranking."""
-
     DEGREE_TO_FREQUENCY_RATIO = 0  # Uses d(w)/f(w) as the metric
     WORD_DEGREE = 1  # Uses d(w) alone as the metric
     WORD_FREQUENCY = 2  # Uses f(w) alone as the metric
 
-doc_preprocess_func = None
-rake_args = None
+
 cntr = DocCounter()
+doc_preprocess_func = None
+pargs = None
+
+
+def file_writer_process(output_folder, prefix, q, lock):
+    print("writer process started")
+    pl_dict = SqliteDict(os.path.join(output_folder, "{0}_{1}.sqlite".format(prefix, "phrase_list")), tablename="phrase_list", autocommit=True)
+    coc_dict = SqliteDict(os.path.join(output_folder, "{0}_{1}.sqlite".format(prefix, "co_occ")), tablename="co_occ", autocommit=True)
+    wd_dict = SqliteDict(os.path.join(output_folder, "{0}_{1}.sqlite".format(prefix, "word_dist")), tablename="word_dist", autocommit=True)
+    local_cntr = 0
+    while(True):
+        data = None
+        lock.acquire()
+        if(not q.empty()):
+            data = q.get()
+        lock.release()
+        if data is not None:
+            word_dist, co_occ, phrase_list = data
+            pl_dict[local_cntr] = phrase_list
+            coc_dict[local_cntr] = co_occ
+            wd_dict[local_cntr] = word_dist
+            local_cntr += 1
+            if(local_cntr%1000 == 0):
+                print("Written {0} documents".format(local_cntr))
+        else:
+            time.sleep(0.1)
+
 
 def rake_process(raw_doc):
     cntr.increment()
@@ -53,33 +80,18 @@ def rake_process(raw_doc):
         doc = raw_doc
     else:
         doc = doc_preprocess_func(raw_doc)
-    rake = RakeProcess(**rake_args)
+    rake = RakeProcess(**pargs)
     rake.extract_keywords_from_text(doc)
     word_dist = rake.get_word_frequency_distribution()
     co_occ = rake.get_word_co_occurance_graph()
     phrase_list = rake.get_phrase_list()
     return [word_dist, co_occ, phrase_list]
 
-def reduce_rake_results(final, res):
-    def merge_co_occ_dicts(d1, d2):
-        for k1 in d2:
-            for k2 in d2[k1]:
-                d1[k1][k2] += d2[k1][k2]
-
-        return d1
-    word_dist, co_occ, phrase_list = res
-    f_word_dist, f_co_occ, f_phrase_list = final
-
-    f_word_dist.update(word_dist)
-    f_co_occ = merge_co_occ_dicts(f_co_occ, co_occ)
-    f_phrase_list.update(phrase_list)
-
-    return [f_word_dist, f_co_occ, f_phrase_list]
-
-
 class DistributedRake(object):
     def __init__(
         self,
+        output_folder,
+        prefix = "",
         stopwords=None,
         punctuations=None,
         language="english",
@@ -87,7 +99,8 @@ class DistributedRake(object):
         max_length=100000,
         min_length=1,
     ):
-        self.args = {"stopwords": stopwords,
+        global pargs
+        pargs = {"stopwords": stopwords,
                      "punctuations": punctuations,
                      "language": language,
                      "ranking_metric": ranking_metric,
@@ -99,100 +112,114 @@ class DistributedRake(object):
         else:
             self.metric = Metric.DEGREE_TO_FREQUENCY_RATIO
 
-        self.frequency_dist = None
-        self.phrase_list = None
-        self.co_occ = None
-        self.degree = None
-        self.rank_list = None
-        self.ranked_phrases = None
+        self.output_folder = output_folder
+        self.prefix = prefix
 
     def digest_docs(self, doc_itr, doc_func = None, num_workers=mp.cpu_count(), chunksize=1000):
         global doc_preprocess_func
-        global rake_args
+        mp_manager = mp.Manager()
+        q = mp_manager.Queue()
+        lock = Lock()
         doc_preprocess_func = doc_func
-        rake_args = self.args
+        print("Spawning writer process")
+        writer_process = Process(target = file_writer_process, args = (self.output_folder, self.prefix, q, lock))
+        writer_process.start()
+        print("Starting Process Pool")
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            self.frequency_dist, self.co_occ, self.phrase_list = reduce(reduce_rake_results, executor.map(rake_process, doc_itr, chunksize=chunksize))
+            result = executor.map(rake_process, doc_itr, chunksize=chunksize)
+            while(True):
+                try:
+                    data = next(result)
+                    lock.acquire()
+                    q.put(data)
+                    lock.release()
+                except Exception as e:
+                    print(e)
+                    break
 
-        self._build_word_degree()
-        self._build_ranklist()
+        while(not q.empty()):
+            time.sleep(1)
 
-    def store_results(self, folder, prefix=""):
-        with open(os.path.join(folder, prefix + "ranked_phrases.pkl"), "wb") as wf:
-            pickle.dump(self.ranked_phrases, wf)
+        writer_process.terminate()
 
-        with open(os.path.join(folder, prefix + "rank_list.pkl"), "wb") as wf:
-            pickle.dump(self.rank_list, wf)
 
-        with open(os.path.join(folder, prefix + "frequency_dist.pkl"), "wb") as wf:
-            pickle.dump(self.frequency_dist, wf)
 
-        with open(os.path.join(folder, prefix + "word_degree.pkl"), "wb") as wf:
-            pickle.dump(self.degree, wf)
+    # def store_results(self, folder, prefix=""):
+    #     with open(os.path.join(folder, prefix + "ranked_phrases.pkl"), "wb") as wf:
+    #         pickle.dump(self.ranked_phrases, wf)
+    #
+    #     with open(os.path.join(folder, prefix + "rank_list.pkl"), "wb") as wf:
+    #         pickle.dump(self.rank_list, wf)
+    #
+    #     with open(os.path.join(folder, prefix + "frequency_dist.pkl"), "wb") as wf:
+    #         pickle.dump(self.frequency_dist, wf)
+    #
+    #     with open(os.path.join(folder, prefix + "word_degree.pkl"), "wb") as wf:
+    #         pickle.dump(self.degree, wf)
 
-    def get_phrase_list(self):
-        return self.phrase_list
+    # def get_phrase_list(self):
+    #     return self.phrase_list
+    #
+    # def get_word_frequency_distribution(self):
+    #     """Method to fetch the word frequency distribution in the given text.
+    #
+    #     :return: Dictionary (defaultdict) of the format `word -> frequency`.
+    #     """
+    #     return self.frequency_dist
+    #
+    # def get_word_co_occurance_graph(self):
+    #     """Method to fetch the degree of words in the given text. Degree can be
+    #     defined as sum of co-occurances of the word with other words in the
+    #     given text.
+    #     """
+    #     return self.co_occ
+    #
+    # def get_ranked_phrases(self):
+    #     """Method to fetch ranked keyword strings.
+    #
+    #     :return: List of strings where each string represents an extracted
+    #              keyword string.
+    #     """
+    #     return self.ranked_phrases
+    #
+    # def get_ranked_phrases_with_scores(self):
+    #     """Method to fetch ranked keyword strings along with their scores.
+    #
+    #     :return: List of tuples where each tuple is formed of an extracted
+    #              keyword string and its score. Ex: (5.68, 'Four Scoures')
+    #     """
+    #     return self.rank_list
+    #
+    # def get_word_degree(self):
+    #     return self.degree
 
-    def get_word_frequency_distribution(self):
-        """Method to fetch the word frequency distribution in the given text.
-
-        :return: Dictionary (defaultdict) of the format `word -> frequency`.
-        """
-        return self.frequency_dist
-
-    def get_word_co_occurance_graph(self):
-        """Method to fetch the degree of words in the given text. Degree can be
-        defined as sum of co-occurances of the word with other words in the
-        given text.
-        """
-        return self.co_occ
-
-    def get_ranked_phrases(self):
-        """Method to fetch ranked keyword strings.
-
-        :return: List of strings where each string represents an extracted
-                 keyword string.
-        """
-        return self.ranked_phrases
-
-    def get_ranked_phrases_with_scores(self):
-        """Method to fetch ranked keyword strings along with their scores.
-
-        :return: List of tuples where each tuple is formed of an extracted
-                 keyword string and its score. Ex: (5.68, 'Four Scoures')
-        """
-        return self.rank_list
-
-    def get_word_degree(self):
-        return self.degree
-
-    def _build_word_degree(self):
-        self.degree = defaultdict(int)
-        for key in self.co_occ:
-            self.degree[key] = sum(self.co_occ[key].values())
-
-    def _build_ranklist(self):
-        """Method to rank each contender phrase using the formula
-
-              phrase_score = sum of scores of words in the phrase.
-              word_score = d(w)/f(w) where d is degree and f is frequency.
-
-        :param phrase_list: List of List of strings where each sublist is a
-                            collection of words which form a contender phrase.
-        """
-        self.rank_list = []
-        for phrase in self.phrase_list:
-            rank = 0.0
-            for word in phrase:
-                if self.metric == Metric.DEGREE_TO_FREQUENCY_RATIO:
-                    rank += 1.0 * self.degree[word] / self.frequency_dist[word]
-                elif self.metric == Metric.WORD_DEGREE:
-                    rank += 1.0 * self.degree[word]
-                else:
-                    rank += 1.0 * self.frequency_dist[word]
-            self.rank_list.append((rank, " ".join(phrase)))
-        self.rank_list.sort(reverse=True)
-        self.ranked_phrases = [ph[1] for ph in self.rank_list]
+    # def build_word_degree(self):
+    #     self.degree = defaultdict(int)
+    #     for key in self.co_occ:
+    #         self.degree[key] = sum(self.co_occ[key].values())
+    #
+    # def build_ranklist(self):
+    #     """Method to rank each contender phrase using the formula
+    #
+    #           phrase_score = sum of scores of words in the phrase.
+    #           word_score = d(w)/f(w) where d is degree and f is frequency.
+    #
+    #     :param phrase_list: List of List of strings where each sublist is a
+    #                         collection of words which form a contender phrase.
+    #     """
+    #     self.rank_list = []
+    #     for phrase in self.phrase_list:
+    #         rank = 0.0
+    #         for word in phrase:
+    #             if self.metric == Metric.DEGREE_TO_FREQUENCY_RATIO:
+    #                 rank += 1.0 * self.degree[word] / self.frequency_dist[word]
+    #             elif self.metric == Metric.WORD_DEGREE:
+    #                 rank += 1.0 * self.degree[word]
+    #             else:
+    #                 rank += 1.0 * self.frequency_dist[word]
+    #         self.rank_list.append((rank, " ".join(phrase)))
+    #     self.rank_list.sort(reverse=True)
+    #     self.ranked_phrases = [ph[1] for ph in self.rank_list]
 
 
 class RakeProcess(object):
