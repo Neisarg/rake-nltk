@@ -24,7 +24,7 @@ import time
 
 class DocCounter(object):
     def __init__(self, initval=0):
-        self.val = Value('i', initval)
+        self.val = Value('L', initval)
         self.lock = Lock()
 
     def increment(self):
