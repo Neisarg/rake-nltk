@@ -72,8 +72,8 @@ class Rake(object):
         self.frequency_dist = None
         self.degree = defaultdict(lambda: 0)
         self.co_occurance_graph = defaultdict(lambda: defaultdict(lambda: 0))
-        # self.rank_list = None
-        # self.ranked_phrases = None
+        self.rank_list = None
+        self.ranked_phrases = None
 
     def extract_keywords_from_text(self, text):
         """Method to extract keywords from the text provided.
@@ -94,21 +94,22 @@ class Rake(object):
         self._build_word_co_occurance_graph(self.phrase_list)
         #self._build_ranklist(phrase_list)
 
-    # def get_ranked_phrases(self):
-    #     """Method to fetch ranked keyword strings.
-    #
-    #     :return: List of strings where each string represents an extracted
-    #              keyword string.
-    #     """
-    #     return self.ranked_phrases
-    #
-    # def get_ranked_phrases_with_scores(self):
-    #     """Method to fetch ranked keyword strings along with their scores.
-    #
-    #     :return: List of tuples where each tuple is formed of an extracted
-    #              keyword string and its score. Ex: (5.68, 'Four Scoures')
-    #     """
-    #     return self.rank_list
+    def get_ranked_phrases(self):
+        """Method to fetch ranked keyword strings.
+
+        :return: List of strings where each string represents an extracted
+                 keyword string.
+        """
+        return self.ranked_phrases
+
+    def get_ranked_phrases_with_scores(self):
+        """Method to fetch ranked keyword strings along with their scores.
+
+        :return: List of tuples where each tuple is formed of an extracted
+                 keyword string and its score. Ex: (5.68, 'Four Scoures')
+        """
+        return self.rank_list
+
     def get_word_co_occurance_graph(self):
         return self.co_occurance_graph
 
@@ -158,28 +159,28 @@ class Rake(object):
         for key in self.co_occurance_graph:
             self.degree[key] = sum(self.co_occurance_graph[key].values())
 
-    # def _build_ranklist(self, phrase_list):
-    #     """Method to rank each contender phrase using the formula
-    #
-    #           phrase_score = sum of scores of words in the phrase.
-    #           word_score = d(w)/f(w) where d is degree and f is frequency.
-    #
-    #     :param phrase_list: List of List of strings where each sublist is a
-    #                         collection of words which form a contender phrase.
-    #     """
-    #     self.rank_list = []
-    #     for phrase in phrase_list:
-    #         rank = 0.0
-    #         for word in phrase:
-    #             if self.metric == Metric.DEGREE_TO_FREQUENCY_RATIO:
-    #                 rank += 1.0 * self.degree[word] / self.frequency_dist[word]
-    #             elif self.metric == Metric.WORD_DEGREE:
-    #                 rank += 1.0 * self.degree[word]
-    #             else:
-    #                 rank += 1.0 * self.frequency_dist[word]
-    #         self.rank_list.append((rank, " ".join(phrase)))
-    #     self.rank_list.sort(reverse=True)
-    #     self.ranked_phrases = [ph[1] for ph in self.rank_list]
+    def build_ranklist(self, phrase_list):
+        """Method to rank each contender phrase using the formula
+
+              phrase_score = sum of scores of words in the phrase.
+              word_score = d(w)/f(w) where d is degree and f is frequency.
+
+        :param phrase_list: List of List of strings where each sublist is a
+                            collection of words which form a contender phrase.
+        """
+        self.rank_list = []
+        for phrase in phrase_list:
+            rank = 0.0
+            for word in phrase:
+                if self.metric == Metric.DEGREE_TO_FREQUENCY_RATIO:
+                    rank += 1.0 * self.degree[word] / self.frequency_dist[word]
+                elif self.metric == Metric.WORD_DEGREE:
+                        rank += 1.0 * self.degree[word]
+                else:
+                    rank += 1.0 * self.frequency_dist[word]
+            self.rank_list.append((rank, " ".join(phrase)))
+        self.rank_list.sort(reverse=True)
+        self.ranked_phrases = [ph[1] for ph in self.rank_list]
 
     def _generate_phrases(self, sentences):
         """Method to generate contender phrases given the sentences of the text
